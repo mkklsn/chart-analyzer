@@ -15,6 +15,9 @@ namespace ChartAnalyzer.Workers;
 /// liquidations rather than real buying or selling). If another market shows the same absorption a little later,
 /// a short follow-up says it confirmed. Coinbase alone never starts an alert, but it can confirm one.
 /// Alerts also show how the Coinbase price compares with Binance, against its usual gap.
+///
+/// Each alert is recorded per zone it touched, and followed for AbsorptionHoldMinutes: it holds unless a Binance spot
+/// close goes past its level. Alerts end with the zone's scoreboard, and a failed absorption gets its own message.
 /// </summary>
 public sealed class LiveAbsorptionWorker(
     BinanceClient binance,
@@ -22,6 +25,8 @@ public sealed class LiveAbsorptionWorker(
     CoinbaseCandles coinbase,
     AbsorptionDetector detector,
     ZoneStore zones,
+    ZoneMonitor zoneMonitor,
+    AbsorptionTally tally,
     TelegramNotifier notifier,
     AlertLog alertLog,
     IOptions<AnalyzerOptions> options,
@@ -37,12 +42,13 @@ public sealed class LiveAbsorptionWorker(
 
     private readonly AnalyzerOptions _options = options.Value;
     private readonly TimeZoneInfo _timeZone = options.Value.GetTimeZone();
+    private readonly TimeSpan _hold = TimeSpan.FromMinutes(options.Value.AbsorptionHoldMinutes);
 
     // Last minute each exchange showed absorption on each side, alerted or not.
     private readonly Dictionary<(string Exchange, AbsorptionSide Side), DateTimeOffset> _lastSeen = [];
 
-    // Last alert per side; repeats within the cooldown are suppressed, except to report a confirming exchange.
-    private readonly Dictionary<AbsorptionSide, (DateTimeOffset Minute, HashSet<string> Exchanges)> _lastAlert = [];
+    // Last alert per side and its zone events; repeats within the cooldown are suppressed, except to report a confirming exchange.
+    private readonly Dictionary<AbsorptionSide, (DateTimeOffset Minute, HashSet<string> Exchanges, List<Guid> Events)> _lastAlert = [];
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -106,6 +112,9 @@ public sealed class LiveAbsorptionWorker(
         }
 
         var watched = zones.GetAll();
+        if (binanceCandles is not null)
+            await ResolvePendingAsync(binanceCandles, watched, ct);
+
         var gap = CoinbaseGap(binanceCandles, coinbase.Candles, minute);
         foreach (var side in Enum.GetValues<AbsorptionSide>())
         {
@@ -127,6 +136,7 @@ public sealed class LiveAbsorptionWorker(
                 if (confirming.Count == 0)
                     continue;
                 last.Exchanges.UnionWith(confirming);
+                tally.AddExchanges(last.Events, confirming, perpsOnly: !last.Exchanges.Any(e => e != Perp));
                 var confirmation = FormatConfirmation(side, last.Minute, confirming, last.Exchanges, checks);
                 alertLog.Record(new SentAlert
                 {
@@ -156,8 +166,19 @@ public sealed class LiveAbsorptionWorker(
                 continue;
             }
 
-            _lastAlert[side] = (minute, showing);
+            var touched = checks.Values
+                .Where(c => c?.Side == side)
+                .SelectMany(c => TouchedZones(c!, watched))
+                .DistinctBy(z => (z.Low, z.High))
+                .ToList();
+            var events = touched.Select(z => NewEvent(z, side, minute, showing, checks)).ToList();
+            foreach (var e in events)
+                tally.Add(e);
+            _lastAlert[side] = (minute, showing, events.Select(e => e.Id).ToList());
+
             var alert = FormatAlert(side, showing, checks, watched) + FormatGap(gap);
+            foreach (var zone in touched)
+                alert += "\n\n" + await zoneMonitor.ScoreboardAsync(zone, ct);
             alertLog.Record(new SentAlert
             {
                 Kind = AlertKind.Absorption,
@@ -176,6 +197,89 @@ public sealed class LiveAbsorptionWorker(
             });
         }
     }
+
+    // The absorption at one zone, to follow until it holds or fails. Its level is the extreme of the absorption
+    // windows (all markets showing it, plus Binance spot's window), so it fails only on a close past all of them.
+    private ZoneAbsorption NewEvent(WatchedZone zone, AbsorptionSide side, DateTimeOffset minute, HashSet<string> showing,
+        Dictionary<string, AbsorptionCheck?> checks)
+    {
+        var binance = checks.GetValueOrDefault(Binance);
+        var windows = checks.Values.Where(c => c?.Side == side).Append(binance).OfType<AbsorptionCheck>().ToList();
+        var main = binance ?? windows[0];
+        return new ZoneAbsorption
+        {
+            Id = Guid.NewGuid(),
+            ZoneLow = zone.Low,
+            ZoneHigh = zone.High,
+            Side = side,
+            Minute = minute,
+            Price = main.Candle.Close,
+            Level = side == AbsorptionSide.Seller ? windows.Min(c => c.Low) : windows.Max(c => c.High),
+            SpotVolume = binance?.Side == side ? (side == AbsorptionSide.Seller ? binance.SellVolume : binance.BuyVolume) : 0,
+            Exchanges = string.Join(", ", Exchanges.Where(showing.Contains)),
+            PerpsOnly = !showing.Any(e => e != Perp),
+            Outcome = AbsorptionOutcome.Pending,
+        };
+    }
+
+    // Decides pending absorptions from Binance spot closes, and sends a message for each one that failed.
+    // Events from before a restart (older than the candles fetched every minute) get their own fetch.
+    private async Task ResolvePendingAsync(IReadOnlyList<Candle> recent, IReadOnlyList<WatchedZone> watched, CancellationToken ct)
+    {
+        foreach (var pending in tally.Pending())
+        {
+            var candles = recent;
+            if (recent.Count == 0 || recent[0].OpenTime > pending.Minute + Minute)
+            {
+                try
+                {
+                    candles = await binance.GetClosedCandlesAsync(_options.Symbol, pending.Minute + Minute, pending.Minute + _hold + Minute, ct);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or IOException)
+                {
+                    logger.LogWarning("Binance candles for an earlier absorption failed: {Message}", ex.Message);
+                    continue;
+                }
+            }
+
+            if (tally.Resolve(pending.Id, candles, _hold) is not { } decided)
+                continue;
+            logger.LogInformation("{Side} absorption at {Minute:HH:mm} at zone {Low:N0}-{High:N0}: {Outcome}",
+                decided.Side, decided.Minute, decided.ZoneLow, decided.ZoneHigh, decided.Outcome);
+
+            var zone = watched.FirstOrDefault(decided.IsAt);
+            if (decided.Outcome != AbsorptionOutcome.Failed || zone is null)
+                continue;
+            var text = FormatFailure(decided, zone) + "\n\n" + await zoneMonitor.ScoreboardAsync(zone, ct);
+            alertLog.Record(new SentAlert
+            {
+                Kind = AlertKind.AbsorptionFailed,
+                Side = decided.Side,
+                Minute = decided.ResolvedMinute,
+                ConfirmsMinute = decided.Minute,
+                Price = decided.ResolvedClose,
+                Exchanges = decided.Exchanges,
+                SpotAndPerps = !decided.PerpsOnly && decided.Exchanges.Contains(Perp),
+                Zones = ZoneName(zone),
+                Text = text,
+                SentAt = DateTimeOffset.UtcNow,
+                Delivered = await SendAsync(text, ct),
+            });
+        }
+    }
+
+    // "✗ Seller absorption from 14:02 failed at support 77,000–77,400: Binance closed 76,950, below its low 76,980 (12 min later)"
+    private string FormatFailure(ZoneAbsorption e, WatchedZone zone)
+    {
+        var seller = e.Side == AbsorptionSide.Seller;
+        var at = TimeZoneInfo.ConvertTime(e.Minute, _timeZone);
+        var after = (e.ResolvedMinute!.Value - e.Minute).TotalMinutes;
+        return $"✗ {(seller ? "Seller absorption (bullish)" : "Buyer absorption (bearish)")} from {at:HH:mm} failed at {ZoneName(zone)}: " +
+               $"Binance closed {e.ResolvedClose:N0}, {(seller ? "below its low" : "above its high")} {e.Level:N0} ({after:0} min later). " +
+               $"{(seller ? "Sellers ran over the patient buyers" : "Buyers ran over the patient sellers")}.";
+    }
+
+    private static string ZoneName(WatchedZone z) => z.Name;
 
     // Coinbase (USD) close minus Binance (USDT) close for the minute, and its median over the past hour.
     // It's normally a little negative, so it's compared with its own usual level rather than with zero.
@@ -228,8 +332,8 @@ public sealed class LiveAbsorptionWorker(
         checks.Values
             .Where(c => c?.Side == side)
             .SelectMany(c => TouchedZones(c!, watched))
-            .DistinctBy(z => z.Id)
-            .Select(z => $"{(z.Profile == ZoneProfile.Macro ? "macro " : "")}{(z.Role == ZoneRole.Resistance ? "resistance" : "support")} {z.Low:N0}–{z.High:N0}");
+            .DistinctBy(z => (z.Low, z.High))
+            .Select(ZoneName);
 
     private string FormatConfirmation(AbsorptionSide side, DateTimeOffset alertMinute, List<string> confirming,
         HashSet<string> allShowing, Dictionary<string, AbsorptionCheck?> checks)

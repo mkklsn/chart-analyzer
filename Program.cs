@@ -72,6 +72,7 @@ else
     builder.Services.AddSingleton<DbWriteQueue>();
     builder.Services.AddSingleton<AlertLog>();
     builder.Services.AddSingleton<ZoneStore>();
+    builder.Services.AddSingleton<AbsorptionTally>();
     builder.Services.AddSingleton<ZoneMonitor>();
 
     // Coinbase requires a User-Agent on API requests.

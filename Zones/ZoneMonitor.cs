@@ -17,10 +17,12 @@ public sealed class ZoneMonitor(
     BinancePerpClient perp,
     CoinbaseHistory coinbase,
     ZoneReport reports,
+    AbsorptionTally tally,
     IOptions<AnalyzerOptions> options,
     ILogger<ZoneMonitor> logger)
 {
     private readonly AnalyzerOptions _options = options.Value;
+    private readonly TimeZoneInfo _timeZone = options.Value.GetTimeZone();
     private readonly CandleCache _minutes = new(binance, options.Value.Symbol, ZoneSettings.Local);
     private readonly CandleCache _hours = new(binance, options.Value.Symbol, ZoneSettings.Macro);
     private readonly CandleCache _perpMinutes = new(perp, options.Value.Symbol, ZoneSettings.Local);
@@ -29,14 +31,8 @@ public sealed class ZoneMonitor(
     public async Task<ZoneAnalysis> AnalyzeAsync(WatchedZone zone, CancellationToken ct)
     {
         var settings = ZoneSettings.For(zone.Profile);
-        var now = DateTimeOffset.UtcNow;
-
-        // Macro zones are judged on complete days only (up to the last daily close); local zones up to now.
-        var to = zone.Profile == ZoneProfile.Macro ? new DateTimeOffset(now.UtcDateTime.Date, TimeSpan.Zero) : now;
-        var from = zone.Since < to.AddDays(-settings.MaxDays) ? to.AddDays(-settings.MaxDays) : zone.Since;
-
+        var (from, to, needFrom) = Range(zone);
         var macro = zone.Profile == ZoneProfile.Macro;
-        var needFrom = from - settings.History;
         var candles = await (macro ? _hours : _minutes).GetAsync(needFrom, ct);
 
         // The other markets are extras: if one can't be fetched, the analysis goes ahead without it.
@@ -62,6 +58,39 @@ public sealed class ZoneMonitor(
     }
 
     public string FormatSummary(ZoneAnalysis analysis) => reports.FormatSummary(analysis);
+
+    /// <summary>
+    /// The absorption scoreboard for the zone: counts per side since the zone was added, which held,
+    /// the current visit, and who's winning. Without Binance, it's shown without the current visit.
+    /// </summary>
+    public async Task<string> ScoreboardAsync(WatchedZone zone, CancellationToken ct)
+    {
+        DateTimeOffset? visitStart = null;
+        try
+        {
+            var settings = ZoneSettings.For(zone.Profile);
+            var candles = await (zone.Profile == ZoneProfile.Macro ? _hours : _minutes).GetAsync(Range(zone).NeedFrom, ct);
+            visitStart = AbsorptionScore.VisitStart(candles, zone.Low, zone.High, settings.VisitGap, DateTimeOffset.UtcNow);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException)
+        {
+            logger.LogWarning("Candles for the zone visit failed, scoreboard without it: {Message}", ex.Message);
+        }
+        return AbsorptionScore.Format(zone, tally.ForZone(zone), zone.CreatedAt, visitStart,
+            TimeSpan.FromMinutes(_options.AbsorptionHoldMinutes), _timeZone);
+    }
+
+    // The analysis range, and where the candles must start (the range plus the history the analysis compares with).
+    private static (DateTimeOffset From, DateTimeOffset To, DateTimeOffset NeedFrom) Range(WatchedZone zone)
+    {
+        var settings = ZoneSettings.For(zone.Profile);
+        var now = DateTimeOffset.UtcNow;
+
+        // Macro zones are judged on complete days only (up to the last daily close); local zones up to now.
+        var to = zone.Profile == ZoneProfile.Macro ? new DateTimeOffset(now.UtcDateTime.Date, TimeSpan.Zero) : now;
+        var from = zone.Since < to.AddDays(-settings.MaxDays) ? to.AddDays(-settings.MaxDays) : zone.Since;
+        return (from, to, from - settings.History);
+    }
 
     private sealed class CandleCache(BinanceClient binance, string symbol, ZoneSettings settings)
     {

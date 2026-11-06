@@ -45,6 +45,12 @@ public sealed class AnalyzerOptions
     /// <summary>After a signal, further signals on the same side are ignored for this many minutes.</summary>
     public int CooldownMinutes { get; set; } = 5;
 
+    /// <summary>
+    /// An absorption alert at a zone "held" if no Binance spot 1-minute candle closed past its window low
+    /// (seller absorption) or high (buyer absorption) within this many minutes. Feeds the zone scoreboard.
+    /// </summary>
+    public int AbsorptionHoldMinutes { get; set; } = 30;
+
     /// <summary>Hour of the day (local time, 0-23) when zone summaries are sent (daily for local zones, Mondays for macro).</summary>
     public int ZoneSummaryHour { get; set; } = 8;
 

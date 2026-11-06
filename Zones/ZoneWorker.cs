@@ -59,7 +59,7 @@ public sealed class ZoneWorker(
                 var analysis = await monitor.AnalyzeAsync(zone, ct);
                 await SendNewAlertsAsync(zone, analysis, ct);
                 if (sendSummary)
-                    await notifier.SendAsync(monitor.FormatSummary(analysis), ct);
+                    await notifier.SendAsync(monitor.FormatSummary(analysis) + "\n\n" + await monitor.ScoreboardAsync(zone, ct), ct);
             }
             catch (Exception ex) when (ex is HttpRequestException or IOException)
             {

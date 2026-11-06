@@ -75,6 +75,9 @@ public sealed record ZoneSettings(
 
     public static ZoneSettings For(ZoneProfile profile) => profile == ZoneProfile.Macro ? Macro : Local;
 
+    /// <summary>Price must stay out of the zone this long before coming back counts as a new visit.</summary>
+    public TimeSpan VisitGap => TestGap * 4;
+
     /// <summary>How much data is needed before the start of the analysis (for the climax comparison).</summary>
     public TimeSpan History => ClimaxPeriod * (ClimaxVolumeLookback + 1);
 }

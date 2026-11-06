@@ -11,6 +11,7 @@ public sealed class DbWriter(
     IDbContextFactory<ChartDbContext> dbFactory,
     DbWriteQueue queue,
     ZoneStore zones,
+    AbsorptionTally tally,
     ILogger<DbWriter> logger) : BackgroundService
 {
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
@@ -43,6 +44,19 @@ public sealed class DbWriter(
             {
                 await using var db = await dbFactory.CreateDbContextAsync(ct);
                 await db.Database.MigrateAsync(ct);
+                var keepFrom = DateTimeOffset.UtcNow - AbsorptionTally.Keep;
+                if (!await db.ZoneAbsorptions.AnyAsync(ct))
+                {
+                    // First run with the scoreboard: rebuild it from the absorption alerts already sent.
+                    var alerts = await db.Alerts.AsNoTracking()
+                        .Where(a => a.SentAt >= keepFrom && (a.Kind == AlertKind.Absorption || a.Kind == AlertKind.Confirmation))
+                        .ToListAsync(ct);
+                    var events = AbsorptionTally.FromAlerts(alerts, await db.Zones.AsNoTracking().ToListAsync(ct));
+                    db.ZoneAbsorptions.AddRange(events);
+                    await db.SaveChangesAsync(ct);
+                    logger.LogInformation("Absorption scoreboard rebuilt from {Alerts} earlier alerts: {Events} events", alerts.Count, events.Count);
+                }
+                tally.Load(await db.ZoneAbsorptions.AsNoTracking().Where(e => e.Minute >= keepFrom).ToListAsync(ct));
                 zones.Load(await db.Zones.AsNoTracking().ToListAsync(ct));
 
                 logger.LogInformation("Database ready. Zones: {Zones}",

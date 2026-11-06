@@ -8,6 +8,7 @@ public sealed class ChartDbContext(DbContextOptions<ChartDbContext> options) : D
     public DbSet<WatchedZone> Zones => Set<WatchedZone>();
     public DbSet<ExchangeCandle> ExchangeCandles => Set<ExchangeCandle>();
     public DbSet<SentAlert> Alerts => Set<SentAlert>();
+    public DbSet<ZoneAbsorption> ZoneAbsorptions => Set<ZoneAbsorption>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -16,6 +17,7 @@ public sealed class ChartDbContext(DbContextOptions<ChartDbContext> options) : D
         configurationBuilder.Properties<ZoneProfile>().HaveConversion<string>().HaveMaxLength(12);
         configurationBuilder.Properties<AlertKind>().HaveConversion<string>().HaveMaxLength(16);
         configurationBuilder.Properties<AbsorptionSide>().HaveConversion<string>().HaveMaxLength(8);
+        configurationBuilder.Properties<AbsorptionOutcome>().HaveConversion<string>().HaveMaxLength(8);
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -38,6 +40,13 @@ public sealed class ChartDbContext(DbContextOptions<ChartDbContext> options) : D
             e.HasIndex(a => a.SentAt);
             e.Property(a => a.Exchanges).HasMaxLength(100);
             e.Property(a => a.Zones).HasMaxLength(500);
+        });
+
+        modelBuilder.Entity<ZoneAbsorption>(e =>
+        {
+            e.HasIndex(a => a.Minute);
+            e.Property(a => a.Id).ValueGeneratedNever();
+            e.Property(a => a.Exchanges).HasMaxLength(100);
         });
     }
 }

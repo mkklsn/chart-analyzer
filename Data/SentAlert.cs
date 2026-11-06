@@ -12,6 +12,9 @@ public enum AlertKind
 
     /// <summary>New signs found by the hourly (or daily, for macro) zone check.</summary>
     Zone,
+
+    /// <summary>An absorption at a zone that price ran through within the hold window.</summary>
+    AbsorptionFailed,
 }
 
 /// <summary>

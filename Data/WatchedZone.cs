@@ -21,6 +21,9 @@ public sealed class WatchedZone
     /// <summary>Keys of signs already alerted (newline-separated), so each alert is sent once.</summary>
     public string AlertedKeys { get; set; } = "";
 
+    /// <summary>"support 77,000–77,400", "macro resistance 84,000–85,000": how alerts name the zone.</summary>
+    public string Name => $"{(Profile == ZoneProfile.Macro ? "macro " : "")}{(Role == ZoneRole.Resistance ? "resistance" : "support")} {Low:N0}–{High:N0}";
+
     public PriceZone ToPriceZone() => new(Low, High, Role, Profile);
 
     public bool Matches(decimal low, decimal high) => Low == Math.Min(low, high) && High == Math.Max(low, high);

@@ -204,7 +204,7 @@ public sealed class TelegramBotWorker(
         try
         {
             var analysis = await zoneMonitor.AnalyzeAsync(zone, ct);
-            await ReplyAsync(chatId, zoneMonitor.FormatSummary(analysis), ct);
+            await ReplyAsync(chatId, zoneMonitor.FormatSummary(analysis) + "\n\n" + await zoneMonitor.ScoreboardAsync(zone, ct), ct);
             return analysis;
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException)

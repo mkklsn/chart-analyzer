@@ -61,22 +61,52 @@ public sealed class ZoneMonitor(
 
     /// <summary>
     /// The absorption scoreboard for the zone: counts per side since the zone was added, which held,
-    /// the current visit, and who's winning. Without Binance, it's shown without the current visit.
+    /// the current visit with its net buying per market vs the price move, and who's winning.
+    /// Without Binance, it's shown without the current visit; a market that can't be fetched is left out.
     /// </summary>
     public async Task<string> ScoreboardAsync(WatchedZone zone, CancellationToken ct)
     {
         DateTimeOffset? visitStart = null;
+        AbsorptionScore.VisitEffort? effort = null;
+        var macro = zone.Profile == ZoneProfile.Macro;
+        var settings = ZoneSettings.For(zone.Profile);
+        var needFrom = Range(zone).NeedFrom;
         try
         {
-            var settings = ZoneSettings.For(zone.Profile);
-            var candles = await (zone.Profile == ZoneProfile.Macro ? _hours : _minutes).GetAsync(Range(zone).NeedFrom, ct);
+            var candles = await (macro ? _hours : _minutes).GetAsync(needFrom, ct);
             visitStart = AbsorptionScore.VisitStart(candles, zone.Low, zone.High, settings.VisitGap, DateTimeOffset.UtcNow);
+            if (visitStart is { } start)
+            {
+                var visit = candles.Where(c => c.OpenTime >= start).ToList();
+                var flows = new List<AbsorptionScore.MarketFlow> { AbsorptionScore.VisitEffort.Flow(binance.Market, visit) };
+                try
+                {
+                    var cb = await coinbase.GetAsync(start, settings.CandleInterval, ct);
+                    if (cb.Count > 0)
+                        flows.Add(AbsorptionScore.VisitEffort.Flow(CoinbaseCandles.Exchange, cb.Where(c => c.OpenTime >= start)));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning("Coinbase candles for the zone visit failed: {Message}", ex.Message);
+                }
+                try
+                {
+                    var perpCandles = await (macro ? _perpHours : _perpMinutes).GetAsync(needFrom, ct);
+                    flows.Add(AbsorptionScore.VisitEffort.Flow(perp.Market, perpCandles.Where(c => c.OpenTime >= start)));
+                }
+                catch (Exception ex) when (ex is HttpRequestException or IOException)
+                {
+                    logger.LogWarning("Binance perp candles for the zone visit failed: {Message}", ex.Message);
+                }
+                if (visit.Count > 0)
+                    effort = new AbsorptionScore.VisitEffort(flows, visit[0].Open, visit[^1].Close);
+            }
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException)
         {
             logger.LogWarning("Candles for the zone visit failed, scoreboard without it: {Message}", ex.Message);
         }
-        return AbsorptionScore.Format(zone, tally.ForZone(zone), zone.CreatedAt, visitStart,
+        return AbsorptionScore.Format(zone, tally.ForZone(zone), zone.CreatedAt, visitStart, effort,
             TimeSpan.FromMinutes(_options.AbsorptionHoldMinutes), _timeZone);
     }
 

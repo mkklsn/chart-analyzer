@@ -44,6 +44,9 @@ public sealed class LiveAbsorptionWorker(
     private readonly TimeZoneInfo _timeZone = options.Value.GetTimeZone();
     private readonly TimeSpan _hold = TimeSpan.FromMinutes(options.Value.AbsorptionHoldMinutes);
 
+    // A failure is only alerted if it happened this recently: not for old absorptions decided after a restart or rebuild.
+    private static readonly TimeSpan FreshFailure = TimeSpan.FromMinutes(3);
+
     // Last minute each exchange showed absorption on each side, alerted or not.
     private readonly Dictionary<(string Exchange, AbsorptionSide Side), DateTimeOffset> _lastSeen = [];
 
@@ -136,7 +139,8 @@ public sealed class LiveAbsorptionWorker(
                 if (confirming.Count == 0)
                     continue;
                 last.Exchanges.UnionWith(confirming);
-                tally.AddExchanges(last.Events, confirming, perpsOnly: !last.Exchanges.Any(e => e != Perp));
+                tally.AddExchanges(last.Events, confirming.ToDictionary(e => e, e => Absorbed(checks[e]!, side)),
+                    perpsOnly: !last.Exchanges.Any(e => e != Perp));
                 var confirmation = FormatConfirmation(side, last.Minute, confirming, last.Exchanges, checks);
                 alertLog.Record(new SentAlert
                 {
@@ -206,7 +210,7 @@ public sealed class LiveAbsorptionWorker(
         var binance = checks.GetValueOrDefault(Binance);
         var windows = checks.Values.Where(c => c?.Side == side).Append(binance).OfType<AbsorptionCheck>().ToList();
         var main = binance ?? windows[0];
-        return new ZoneAbsorption
+        var e = new ZoneAbsorption
         {
             Id = Guid.NewGuid(),
             ZoneLow = zone.Low,
@@ -215,12 +219,20 @@ public sealed class LiveAbsorptionWorker(
             Minute = minute,
             Price = main.Candle.Close,
             Level = side == AbsorptionSide.Seller ? windows.Min(c => c.Low) : windows.Max(c => c.High),
-            SpotVolume = binance?.Side == side ? (side == AbsorptionSide.Seller ? binance.SellVolume : binance.BuyVolume) : 0,
             Exchanges = string.Join(", ", Exchanges.Where(showing.Contains)),
-            PerpsOnly = !showing.Any(e => e != Perp),
+            PerpsOnly = !showing.Any(x => x != Perp),
             Outcome = AbsorptionOutcome.Pending,
         };
+        foreach (var (exchange, check) in checks)
+        {
+            if (check?.Side == side && showing.Contains(exchange))
+                e.AddVolume(exchange, Absorbed(check, side));
+        }
+        return e;
     }
+
+    private static decimal Absorbed(AbsorptionCheck check, AbsorptionSide side) =>
+        side == AbsorptionSide.Seller ? check.SellVolume : check.BuyVolume;
 
     // Decides pending absorptions from Binance spot closes, and sends a message for each one that failed.
     // Events from before a restart (older than the candles fetched every minute) get their own fetch.
@@ -242,13 +254,14 @@ public sealed class LiveAbsorptionWorker(
                 }
             }
 
-            if (tally.Resolve(pending.Id, candles, _hold) is not { } decided)
+            if (tally.Resolve(pending.Id, candles, _hold, _options.AbsorptionFailBuffer) is not { } decided)
                 continue;
             logger.LogInformation("{Side} absorption at {Minute:HH:mm} at zone {Low:N0}-{High:N0}: {Outcome}",
                 decided.Side, decided.Minute, decided.ZoneLow, decided.ZoneHigh, decided.Outcome);
 
             var zone = watched.FirstOrDefault(decided.IsAt);
-            if (decided.Outcome != AbsorptionOutcome.Failed || zone is null)
+            var fresh = decided.ResolvedMinute >= DateTimeOffset.UtcNow - FreshFailure;
+            if (decided.Outcome != AbsorptionOutcome.Failed || zone is null || !fresh)
                 continue;
             var text = FormatFailure(decided, zone) + "\n\n" + await zoneMonitor.ScoreboardAsync(zone, ct);
             alertLog.Record(new SentAlert
@@ -275,7 +288,8 @@ public sealed class LiveAbsorptionWorker(
         var at = TimeZoneInfo.ConvertTime(e.Minute, _timeZone);
         var after = (e.ResolvedMinute!.Value - e.Minute).TotalMinutes;
         return $"✗ {(seller ? "Seller absorption (bullish)" : "Buyer absorption (bearish)")} from {at:HH:mm} failed at {ZoneName(zone)}: " +
-               $"Binance closed {e.ResolvedClose:N0}, {(seller ? "below its low" : "above its high")} {e.Level:N0} ({after:0} min later). " +
+               $"Binance closed {e.ResolvedClose:N0}, {(seller ? "below its low" : "above its high")} {e.Level:N0} by more than " +
+               $"{_options.AbsorptionFailBuffer:0.##%} ({after:0} min later). " +
                $"{(seller ? "Sellers ran over the patient buyers" : "Buyers ran over the patient sellers")}.";
     }
 

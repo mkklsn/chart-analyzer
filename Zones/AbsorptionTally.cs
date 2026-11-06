@@ -40,17 +40,18 @@ public sealed class AbsorptionTally(DbWriteQueue queue)
         });
     }
 
-    /// <summary>Adds markets that confirmed these events after the alert.</summary>
-    public void AddExchanges(IEnumerable<Guid> ids, IEnumerable<string> exchanges, bool perpsOnly)
+    /// <summary>Adds markets that confirmed these events after the alert, with the volume each absorbed.</summary>
+    public void AddExchanges(IEnumerable<Guid> ids, IReadOnlyDictionary<string, decimal> confirming, bool perpsOnly)
     {
-        var added = exchanges.ToList();
         lock (_lock)
         {
             foreach (var e in _events.Where(e => ids.Contains(e.Id)))
             {
-                var all = e.Exchanges.Split(", ", StringSplitOptions.RemoveEmptyEntries).Union(added).ToList();
+                var all = e.Exchanges.Split(", ", StringSplitOptions.RemoveEmptyEntries).Union(confirming.Keys).ToList();
                 e.Exchanges = string.Join(", ", all);
                 e.PerpsOnly = perpsOnly;
+                foreach (var (exchange, volume) in confirming)
+                    e.AddVolume(exchange, volume);
                 Save(e);
             }
         }
@@ -63,12 +64,12 @@ public sealed class AbsorptionTally(DbWriteQueue queue)
     }
 
     /// <summary>Decides the event from the candles after it; returns a copy of it if it was decided now.</summary>
-    public ZoneAbsorption? Resolve(Guid id, IReadOnlyList<Candle> candles, TimeSpan hold)
+    public ZoneAbsorption? Resolve(Guid id, IReadOnlyList<Candle> candles, TimeSpan hold, decimal buffer)
     {
         lock (_lock)
         {
             var e = _events.FirstOrDefault(x => x.Id == id);
-            if (e is null || !AbsorptionScore.Resolve(e, candles, hold))
+            if (e is null || !AbsorptionScore.Resolve(e, candles, hold, buffer))
                 return null;
             Save(e);
             return e.Copy();
@@ -92,30 +93,32 @@ public sealed class AbsorptionTally(DbWriteQueue queue)
         foreach (var a in alerts.Where(a => a.Kind == AlertKind.Absorption && a.Side is not null && a.Minute is not null))
         {
             var side = a.Side!.Value;
-            List<StoredCheck> checks;
-            try
-            {
-                checks = JsonSerializer.Deserialize<List<StoredCheck>>(a.Details ?? "[]", Json) ?? [];
-            }
-            catch (JsonException)
-            {
-                continue;
-            }
+            var checks = Parse(a.Details);
             var binance = checks.FirstOrDefault(c => c.Exchange == "Binance" && c.Low is not null);
             var windows = checks.Where(c => c.Side == side && c.Low is not null).Append(binance).OfType<StoredCheck>().ToList();
             if (windows.Count == 0)
                 continue;
 
-            var exchanges = (a.Exchanges ?? "").Split(", ", StringSplitOptions.RemoveEmptyEntries)
-                .Concat(alerts
-                    .Where(c => c.Kind == AlertKind.Confirmation && c.Side == side && c.ConfirmsMinute == a.Minute)
-                    .SelectMany(c => (c.Exchanges ?? "").Split(", ", StringSplitOptions.RemoveEmptyEntries)))
-                .Distinct()
-                .ToList();
+            // Absorbed volume per market: from the alert's own checks, then from each confirmation's checks.
+            var volumes = new Dictionary<string, decimal>();
+            void AddVolumes(IEnumerable<StoredCheck> from, IEnumerable<string> exchanges)
+            {
+                foreach (var c in from.Where(c => c.Side == side && exchanges.Contains(c.Exchange)))
+                    volumes.TryAdd(c.Exchange, (side == AbsorptionSide.Seller ? c.SellVolume : c.BuyVolume) ?? 0);
+            }
+            var alerted = (a.Exchanges ?? "").Split(", ", StringSplitOptions.RemoveEmptyEntries).ToList();
+            AddVolumes(checks, alerted);
+            var exchanges = alerted;
+            foreach (var confirmation in alerts.Where(c => c.Kind == AlertKind.Confirmation && c.Side == side && c.ConfirmsMinute == a.Minute))
+            {
+                var confirming = (confirmation.Exchanges ?? "").Split(", ", StringSplitOptions.RemoveEmptyEntries);
+                exchanges = exchanges.Union(confirming).ToList();
+                AddVolumes(Parse(confirmation.Details), confirming);
+            }
             var names = (a.Zones ?? "").Split("; ", StringSplitOptions.RemoveEmptyEntries);
             foreach (var zone in zones.Where(z => names.Contains(z.Name)))
             {
-                events.Add(new ZoneAbsorption
+                var e = new ZoneAbsorption
                 {
                     Id = Guid.NewGuid(),
                     ZoneLow = zone.Low,
@@ -124,14 +127,28 @@ public sealed class AbsorptionTally(DbWriteQueue queue)
                     Minute = a.Minute!.Value,
                     Price = a.Price ?? windows[0].Close ?? 0,
                     Level = side == AbsorptionSide.Seller ? windows.Min(c => c.Low!.Value) : windows.Max(c => c.High!.Value),
-                    SpotVolume = binance?.Side == side ? (side == AbsorptionSide.Seller ? binance.SellVolume : binance.BuyVolume) ?? 0 : 0,
                     Exchanges = string.Join(", ", exchanges),
-                    PerpsOnly = exchanges.All(e => e == "Binance perp"),
+                    PerpsOnly = exchanges.All(x => x == "Binance perp"),
                     Outcome = AbsorptionOutcome.Pending,
-                });
+                };
+                foreach (var (exchange, volume) in volumes)
+                    e.AddVolume(exchange, volume);
+                events.Add(e);
             }
         }
         return events;
+    }
+
+    private static List<StoredCheck> Parse(string? details)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<List<StoredCheck>>(details ?? "[]", Json) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private static readonly JsonSerializerOptions Json = new() { Converters = { new JsonStringEnumConverter() } };

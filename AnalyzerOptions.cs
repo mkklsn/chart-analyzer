@@ -46,10 +46,16 @@ public sealed class AnalyzerOptions
     public int CooldownMinutes { get; set; } = 5;
 
     /// <summary>
-    /// An absorption alert at a zone "held" if no Binance spot 1-minute candle closed past its window low
+    /// An absorption alert at a zone "held" if no Binance spot 1-minute candle closed clearly (see AbsorptionFailBuffer) past its window low
     /// (seller absorption) or high (buyer absorption) within this many minutes. Feeds the zone scoreboard.
     /// </summary>
     public int AbsorptionHoldMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// How far past the absorption's level a close must be to count as a break, as a fraction of the level
+    /// (0.001 = 0.1%, about $75 at 75,000). Without it, half the breaks were closes $25 or less past the level.
+    /// </summary>
+    public decimal AbsorptionFailBuffer { get; set; } = 0.001m;
 
     /// <summary>Hour of the day (local time, 0-23) when zone summaries are sent (daily for local zones, Mondays for macro).</summary>
     public int ZoneSummaryHour { get; set; } = 8;

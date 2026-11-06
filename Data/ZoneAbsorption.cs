@@ -40,8 +40,24 @@ public sealed class ZoneAbsorption
     /// </summary>
     public decimal Level { get; set; }
 
-    /// <summary>Absorbed volume on Binance spot (sell volume for seller absorption); 0 when spot didn't show it.</summary>
-    public decimal SpotVolume { get; set; }
+    /// <summary>
+    /// Absorbed volume (sell volume for seller absorption, buy volume for buyer absorption) on each market that showed it,
+    /// including markets that confirmed it later; 0 for a market that didn't. Kept per market: the perp trades ~8x spot.
+    /// </summary>
+    public decimal BinanceVolume { get; set; }
+    public decimal CoinbaseVolume { get; set; }
+    public decimal PerpVolume { get; set; }
+
+    /// <summary>Adds a market's absorbed volume (by its exchange name).</summary>
+    public void AddVolume(string exchange, decimal volume)
+    {
+        switch (exchange)
+        {
+            case "Binance": BinanceVolume = volume; break;
+            case "Coinbase": CoinbaseVolume = volume; break;
+            case "Binance perp": PerpVolume = volume; break;
+        }
+    }
 
     /// <summary>Markets that showed it, including later confirmations, e.g. "Binance, Binance perp".</summary>
     public string Exchanges { get; set; } = "";

@@ -176,6 +176,14 @@ namespace ChartAnalyzer.Migrations
                     b.Property<Guid>("Id")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<decimal>("BinanceVolume")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("decimal(18,8)");
+
+                    b.Property<decimal>("CoinbaseVolume")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("decimal(18,8)");
+
                     b.Property<string>("Exchanges")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -192,6 +200,10 @@ namespace ChartAnalyzer.Migrations
                         .IsRequired()
                         .HasMaxLength(8)
                         .HasColumnType("nvarchar(8)");
+
+                    b.Property<decimal>("PerpVolume")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("decimal(18,8)");
 
                     b.Property<bool>("PerpsOnly")
                         .HasColumnType("bit");
@@ -211,10 +223,6 @@ namespace ChartAnalyzer.Migrations
                         .IsRequired()
                         .HasMaxLength(8)
                         .HasColumnType("nvarchar(8)");
-
-                    b.Property<decimal>("SpotVolume")
-                        .HasPrecision(18, 8)
-                        .HasColumnType("decimal(18,8)");
 
                     b.Property<decimal>("ZoneHigh")
                         .HasPrecision(18, 8)

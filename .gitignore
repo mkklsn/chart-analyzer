@@ -1,0 +1,29 @@
+# Build output
+bin/
+obj/
+publish/
+out/
+*.nupkg
+
+# IDE / user state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.rsuser
+
+# Logs / runtime artifacts
+*.log
+logs/
+TestResults/
+
+# Secrets / local config (secrets live in dotnet user-secrets)
+*.env
+.env*
+appsettings.*.local.json
+secrets.json
+*.pfx
+*.pem
+*.key
+github_pat*.txt

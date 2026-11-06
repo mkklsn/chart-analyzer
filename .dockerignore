@@ -1,0 +1,8 @@
+bin/
+obj/
+infra/
+.config/
+.vs/
+*.ps1
+*.md
+appsettings.Development.json
